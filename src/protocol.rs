@@ -197,17 +197,17 @@ where
     T: Serialize,
 {
     let body = match serde_json::to_value(message) {
-        Ok(v) => match v {
-            Value::Object(m) => m,
-            _ => bail!("response object has invalid serde_json::Value kind"),
-        },
+        Ok(v) => v,
         Err(e) => bail!("response object is invalid, can't convert: {}", e),
     };
+    if !body.is_object() {
+        bail!("response object has invalid serde_json::Value kind");
+    }
 
     let msg = Message {
         src: from.into(),
         dest: to.into(),
-        body: MessageBody::from_extra(body),
+        body: serde_json::from_value(body)?,
     };
 
     Ok(msg)
@@ -220,9 +220,53 @@ fn u64_zero_by_ref(num: &u64) -> bool {
 
 #[cfg(test)]
 mod test {
-    use crate::protocol::{InitMessageBody, Message, MessageBody};
+    use crate::protocol::{message, InitMessageBody, Message, MessageBody};
     use crate::runtime::Result;
     use serde_json::{Map, Value};
+
+    #[test]
+    fn forwarding_body_replaces_message_id_without_duplicate_keys() -> Result<()> {
+        let incoming: MessageBody =
+            serde_json::from_str(r#"{"type":"broadcast","msg_id":1,"message":0}"#)?;
+        let mut outgoing = message("n0", "n1", incoming)?;
+        outgoing.body.msg_id = 86;
+
+        let encoded = serde_json::to_string(&outgoing)?;
+        assert_eq!(encoded.matches("\"msg_id\":").count(), 1);
+        let decoded: Message = serde_json::from_str(&encoded)?;
+        let expected = Message {
+            src: "n0".to_string(),
+            dest: "n1".to_string(),
+            body: MessageBody::from_extra(Map::from_iter([(
+                "message".to_string(),
+                Value::from(0),
+            )]))
+            .with_type("broadcast")
+            .and_msg_id(86),
+        };
+        assert_eq!(decoded, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn message_separates_reserved_fields_from_payload() -> Result<()> {
+        let raw = r#"{"type":"echo_ok","msg_id":7,"in_reply_to":1,"echo":{"msg_id":99}}"#;
+        let body: Value = serde_json::from_str(&raw)?;
+        let outgoing = message("n0", "c1", body)?;
+        let expected = Message {
+            src: "n0".to_string(),
+            dest: "c1".to_string(),
+            body: MessageBody::from_extra(Map::from_iter([(
+                "echo".to_string(),
+                Value::Object(Map::from_iter([("msg_id".to_string(), Value::from(99))])),
+            )]))
+            .with_type("echo_ok")
+            .and_msg_id(7)
+            .with_reply_to(1),
+        };
+        assert_eq!(outgoing, expected);
+        Ok(())
+    }
 
     #[test]
     fn parse_message() -> Result<()> {

@@ -193,17 +193,23 @@ impl Runtime {
     where
         T: Serialize,
     {
+        let msg = self.reply_message(req, resp)?;
+        let answer = serde_json::to_string(&msg)?;
+        self.send_raw(answer.as_str()).await
+    }
+
+    fn reply_message<T>(&self, req: Message, resp: T) -> Result<Message>
+    where
+        T: Serialize,
+    {
         let mut msg = crate::protocol::message(self.node_id(), req.src, resp)?;
         msg.body.in_reply_to = req.body.msg_id;
 
-        if !msg.body.extra.contains_key("type") && !req.body.typ.is_empty() {
-            let key = "type".to_string();
-            let value = Value::String(req.body.typ + "_ok");
-            msg.body.extra.insert(key, value);
+        if msg.body.typ.is_empty() && !req.body.typ.is_empty() {
+            msg.body.typ = req.body.typ + "_ok";
         }
 
-        let answer = serde_json::to_string(&msg)?;
-        self.send_raw(answer.as_str()).await
+        Ok(msg)
     }
 
     pub async fn reply_ok(&self, req: Message) -> Result<()> {
@@ -585,9 +591,53 @@ impl Node for EchoNode {
 
 #[cfg(test)]
 mod test {
+    use crate::protocol::{Message, MessageBody};
     use crate::{MembershipState, Result, Runtime};
+    use serde_json::{Map, Value};
     use tokio::io::BufReader;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn reply_preserves_explicit_type() -> Result<()> {
+        let runtime = Runtime::new();
+        runtime.set_membership_state(MembershipState::example("n0", &["n0"]))?;
+        let raw = r#"{"src":"c1","dest":"n0","body":{"type":"echo","msg_id":1}}"#;
+        let req: Message = serde_json::from_str(&raw)?;
+        let resp: Value =
+            serde_json::from_str(r#"{"type":"custom_ok","in_reply_to":99,"echo":"hello"}"#)?;
+        let msg = runtime.reply_message(req, resp)?;
+        let encoded = serde_json::to_string(&msg)?;
+        assert_eq!(encoded.matches("\"in_reply_to\":").count(), 1);
+        let decoded: Message = serde_json::from_str(&encoded)?;
+        let expected = Message {
+            src: "n0".to_string(),
+            dest: "c1".to_string(),
+            body: MessageBody::from_extra(Map::from_iter([(
+                "echo".to_string(),
+                Value::String("hello".to_string()),
+            )]))
+            .with_type("custom_ok")
+            .with_reply_to(1),
+        };
+        assert_eq!(decoded, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reply_defaults_type() -> Result<()> {
+        let runtime = Runtime::new();
+        runtime.set_membership_state(MembershipState::example("n0", &["n0"]))?;
+        let raw = r#"{"src":"c1","dest":"n0","body":{"type":"echo","msg_id":1}}"#;
+        let req: Message = serde_json::from_str(&raw)?;
+        let msg = runtime.reply_message(req, Runtime::empty_response())?;
+        let expected = Message {
+            src: "n0".to_string(),
+            dest: "c1".to_string(),
+            body: MessageBody::new().with_type("echo_ok").with_reply_to(1),
+        };
+        assert_eq!(msg, expected);
+        Ok(())
+    }
 
     #[test]
     fn membership() -> Result<()> {
