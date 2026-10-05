@@ -200,14 +200,15 @@ where
         Ok(v) => v,
         Err(e) => bail!("response object is invalid, can't convert: {}", e),
     };
-    if !body.is_object() {
-        bail!("response object has invalid serde_json::Value kind");
-    }
+    let body = match serde_json::from_value(body) {
+        Ok(v) => v,
+        Err(e) => bail!("response object is invalid, can't convert: {}", e),
+    };
 
     let msg = Message {
         src: from.into(),
         dest: to.into(),
-        body: serde_json::from_value(body)?,
+        body,
     };
 
     Ok(msg)
